@@ -14,6 +14,20 @@
 #ifndef ADAFRUIT_VS1053_H
 #define ADAFRUIT_VS1053_H
 
+#ifdef VS1053_USE_WIRINGPI
+
+#include <stdint.h>
+#include <iostream>
+#include <fstream>
+#include <errno.h>
+#include <wiringPi.h>
+#include <wiringPiSPI.h>
+#include <unistd.h>
+
+typedef bool boolean;
+
+#else
+
 #if (ARDUINO >= 100)
  #include <Arduino.h>
 #else
@@ -28,6 +42,8 @@
 
 #include <SPI.h> 
 #include <SD.h>
+
+#endif
 
 // define here the size of a register!
 #if defined(ARDUINO_STM32_FEATHER)
@@ -102,11 +118,12 @@ typedef volatile RwReg PortReg;
 
 #define VS1053_DATABUFFERLEN 32
 
-
 class Adafruit_VS1053 {
  public:
+#ifndef VS1053_USE_WIRINGPI // WiringPi does not support software SPI (not a RTOS)
   Adafruit_VS1053(int8_t mosi, int8_t miso, int8_t clk, 
 		  int8_t rst, int8_t cs, int8_t dcs, int8_t dreq);
+#endif
   Adafruit_VS1053(int8_t rst, int8_t cs, int8_t dcs, int8_t dreq);
   uint8_t begin(void);
   void reset(void);
@@ -125,7 +142,7 @@ class Adafruit_VS1053 {
   void playData(uint8_t *buffer, uint8_t buffsiz);
   boolean readyForData(void);
   void applyPatch(const uint16_t *patch, uint16_t patchsize);
-  uint16_t loadPlugin(char *fn);
+  uint16_t loadPlugin(const char *fn);
 
   void GPIO_digitalWrite(uint8_t i, uint8_t val);
   void GPIO_digitalWrite(uint8_t i);
@@ -133,11 +150,12 @@ class Adafruit_VS1053 {
   boolean GPIO_digitalRead(uint8_t i);
   void GPIO_pinMode(uint8_t i, uint8_t dir);
  
-  boolean prepareRecordOgg(char *plugin);
+  boolean prepareRecordOgg(const char *plugin);
   void startRecordOgg(boolean mic);
   void stopRecordOgg(void);
   uint16_t recordedWordsWaiting(void);
   uint16_t recordedReadWord(void);
+  uint32_t recordedReadData(uint8_t* buff, uint32_t buffsiz);
 
   uint8_t mp3buffer[VS1053_DATABUFFERLEN];
 
@@ -159,17 +177,23 @@ private:
 
 class Adafruit_VS1053_FilePlayer : public Adafruit_VS1053 {
  public:
+#ifndef VS1053_USE_WIRINGPI // WiringPi does not support software SPI (not a RTOS)
   Adafruit_VS1053_FilePlayer (int8_t mosi, int8_t miso, int8_t clk, 
 			      int8_t rst, int8_t cs, int8_t dcs, int8_t dreq,
 			      int8_t cardCS);
+#endif
   Adafruit_VS1053_FilePlayer (int8_t rst, int8_t cs, int8_t dcs, int8_t dreq,
 			      int8_t cardCS);
   Adafruit_VS1053_FilePlayer (int8_t cs, int8_t dcs, int8_t dreq,
 			      int8_t cardCS);
 
   boolean begin(void);
+#ifdef VS1053_USE_WIRINGPI
+  std::ifstream currentTrack;
+#else
   boolean useInterrupt(uint8_t type);
   File currentTrack;
+#endif
   volatile boolean playingMusic;
   void feedBuffer(void);
   boolean startPlayingFile(const char *trackname);

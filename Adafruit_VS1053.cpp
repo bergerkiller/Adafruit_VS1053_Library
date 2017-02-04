@@ -12,8 +12,43 @@
   BSD license, all text above must be included in any redistribution
  ****************************************************/
 
+#ifdef VS1053_USE_WIRINGPI
+
+#include "Adafruit_VS1053.h"
+#include <iostream>
+#include <sys/ioctl.h>
+#include <linux/spi/spidev.h>
+#include <string.h>
+
+#define VS1053_CHANNEL 0 // We need a chip select channel to work with SPI
+#define VS1053_BUS_SPEED_HZ  2000000 // SPI bus speed of 1Mhz is supported
+
+#define interrupts() // No interrupts on the Pi
+#define noInterrupts() // No interrupts on the Pi
+#define pgm_read_word(buf) (*(buf)) // No flash memory on the Pi
+
+// Default wiring SPI does not support delays, alternative CS and write-only transfers
+// This function replaces the wiringPiSPIDataRW function
+// We always write 
+static void wiringpi_spi_transfer(uint8_t* buff, uint32_t len, uint16_t delay = 0, bool do_read = false) {
+  struct spi_ioc_transfer spi;
+  memset (&spi, 0, sizeof (spi));
+  spi.tx_buf        = (unsigned long) buff;
+  spi.rx_buf        = do_read ? (unsigned long) buff : 0L;
+  spi.len           = len;
+  spi.cs_change     = SPI_NO_CS;
+  spi.delay_usecs   = delay;
+  spi.speed_hz      = VS1053_BUS_SPEED_HZ;
+  spi.bits_per_word = 8;
+  ioctl(wiringPiSPIGetFd(VS1053_CHANNEL), SPI_IOC_MESSAGE(1), &spi);
+}
+
+#else
+
 #include <Adafruit_VS1053.h>
 #include <SD.h>
+
+#endif
 
 #if defined(ARDUINO_STM32_FEATHER)
    #define digitalPinToInterrupt(x) x
@@ -42,7 +77,7 @@ static void feeder(void) {
 #define VS1053_CONTROL_SPI_SETTING  SPISettings(250000,  MSBFIRST, SPI_MODE0)
 #define VS1053_DATA_SPI_SETTING     SPISettings(8000000, MSBFIRST, SPI_MODE0)
 
-
+#ifndef VS1053_USE_WIRINGPI
 boolean Adafruit_VS1053_FilePlayer::useInterrupt(uint8_t type) {
   myself = this;  // oy vey
     
@@ -90,6 +125,7 @@ boolean Adafruit_VS1053_FilePlayer::useInterrupt(uint8_t type) {
   }
   return false;
 }
+#endif
 
 Adafruit_VS1053_FilePlayer::Adafruit_VS1053_FilePlayer(
 	       int8_t rst, int8_t cs, int8_t dcs, int8_t dreq, 
@@ -99,8 +135,10 @@ Adafruit_VS1053_FilePlayer::Adafruit_VS1053_FilePlayer(
   playingMusic = false;
 
   // Set the card to be disabled while we get the VS1053 up
+#ifndef VS1053_USE_WIRINGPI // Do NOT do anything with the card on raspi!
   pinMode(_cardCS, OUTPUT);
-  digitalWrite(_cardCS, HIGH);  
+  digitalWrite(_cardCS, HIGH); 
+#endif
 }
 
 Adafruit_VS1053_FilePlayer::Adafruit_VS1053_FilePlayer(
@@ -111,11 +149,14 @@ Adafruit_VS1053_FilePlayer::Adafruit_VS1053_FilePlayer(
   playingMusic = false;
 
   // Set the card to be disabled while we get the VS1053 up
+#ifndef VS1053_USE_WIRINGPI // Do NOT do anything with the card on raspi!
   pinMode(_cardCS, OUTPUT);
-  digitalWrite(_cardCS, HIGH);  
+  digitalWrite(_cardCS, HIGH);
+#endif
 }
 
 
+#ifndef VS1053_USE_WIRINGPI // WiringPi does not support software SPI (not a RTOS)
 Adafruit_VS1053_FilePlayer::Adafruit_VS1053_FilePlayer(
                int8_t mosi, int8_t miso, int8_t clk, 
 	       int8_t rst, int8_t cs, int8_t dcs, int8_t dreq, 
@@ -128,6 +169,7 @@ Adafruit_VS1053_FilePlayer::Adafruit_VS1053_FilePlayer(
   pinMode(_cardCS, OUTPUT);
   digitalWrite(_cardCS, HIGH);  
 }
+#endif
 
 boolean Adafruit_VS1053_FilePlayer::begin(void) {
   uint8_t v  = Adafruit_VS1053::begin();   
@@ -141,13 +183,20 @@ boolean Adafruit_VS1053_FilePlayer::begin(void) {
 boolean Adafruit_VS1053_FilePlayer::playFullFile(const char *trackname) {
   if (! startPlayingFile(trackname)) return false;
 
+  #ifdef VS1053_USE_WIRINGPI // Interrupts always fire on raspi; don't sleep.
+  while (playingMusic)
+    feedBuffer();
+  #else
   while (playingMusic) {
+
     // twiddle thumbs
     noInterrupts();
     feedBuffer();
     interrupts();
     delay(100);           // give IRQs a chance
   }
+  #endif
+  
   // music file finished!
   return true;
 }
@@ -186,10 +235,17 @@ boolean Adafruit_VS1053_FilePlayer::startPlayingFile(const char *trackname) {
   sciWrite(VS1053_REG_WRAMADDR, 0x1e29);
   sciWrite(VS1053_REG_WRAM, 0);
 
+#ifdef VS1053_USE_WIRINGPI
+  currentTrack.open(trackname);
+  if (!currentTrack.is_open()) {
+    return false;
+  }
+#else
   currentTrack = SD.open(trackname);
   if (!currentTrack) {
     return false;
   }
+#endif
 
   // don't let the IRQ get triggered by accident here
   noInterrupts();
@@ -230,8 +286,16 @@ void Adafruit_VS1053_FilePlayer::feedBuffer(void) {
   // Feed the hungry buffer! :)
   while (readyForData()) {
     // Read some audio data from the SD card file
-    int bytesread = currentTrack.read(mp3buffer, VS1053_DATABUFFERLEN);
-    
+    uint8_t bytesread = 0;
+#ifdef VS1053_USE_WIRINGPI
+    if (!currentTrack.eof()) {
+        currentTrack.read((char*) mp3buffer, VS1053_DATABUFFERLEN);
+        bytesread = currentTrack.gcount();
+    }
+#else
+    bytesread = currentTrack.read(mp3buffer, VS1053_DATABUFFERLEN);
+#endif
+
     if (bytesread == 0) {
       // must be at the end of the file, wrap it up!
       playingMusic = false;
@@ -252,6 +316,7 @@ void Adafruit_VS1053_FilePlayer::feedBuffer(void) {
 static volatile PortReg *clkportreg, *misoportreg, *mosiportreg;
 static PortMask clkpin, misopin, mosipin;
 
+#ifndef VS1053_USE_WIRINGPI // WiringPi does not support software SPI (not a RTOS)
 Adafruit_VS1053::Adafruit_VS1053(int8_t mosi, int8_t miso, int8_t clk, 
 			   int8_t rst, int8_t cs, int8_t dcs, int8_t dreq) {
   _mosi = mosi;
@@ -271,7 +336,7 @@ Adafruit_VS1053::Adafruit_VS1053(int8_t mosi, int8_t miso, int8_t clk,
   mosiportreg = portOutputRegister(digitalPinToPort(_mosi));
   mosipin = digitalPinToBitMask(_mosi);
 }
-
+#endif
 
 Adafruit_VS1053::Adafruit_VS1053(int8_t rst, int8_t cs, int8_t dcs, int8_t dreq) {
   _mosi = 0;
@@ -315,24 +380,34 @@ void Adafruit_VS1053::applyPatch(const uint16_t *patch, uint16_t patchsize) {
 }
 
 
-uint16_t Adafruit_VS1053::loadPlugin(char *plugname) {
+uint16_t Adafruit_VS1053::loadPlugin(const char *plugname) {
 
+#ifdef VS1053_USE_WIRINGPI
+#define PLUGIN_READCHAR()   plugin.get()
+  std::ifstream plugin(plugname);
+  if (!plugin.good()) {
+    std::cerr << "Couldn't open the plugin file " << plugname;
+    return 0xFFFF;
+  }
+#else
+#define PLUGIN_READCHAR()  plugin.read()
   File plugin = SD.open(plugname);
   if (!plugin) {
     Serial.println("Couldn't open the plugin file");
     Serial.println(plugin);
     return 0xFFFF;
   }
+#endif
 
-  if ((plugin.read() != 'P') ||
-      (plugin.read() != '&') ||
-      (plugin.read() != 'H'))
+  if ((PLUGIN_READCHAR() != 'P') ||
+      (PLUGIN_READCHAR() != '&') ||
+      (PLUGIN_READCHAR() != 'H'))
     return 0xFFFF;
 
   uint16_t type;
 
  // Serial.print("Patch size: "); Serial.println(patchsize);
-  while ((type = plugin.read()) >= 0) {
+  while ((type = PLUGIN_READCHAR()) >= 0) {
     uint16_t offsets[] = {0x8000UL, 0x0, 0x4000UL};
     uint16_t addr, len;
 
@@ -343,10 +418,10 @@ uint16_t Adafruit_VS1053::loadPlugin(char *plugname) {
 	return 0xFFFF;
     }
 
-    len = plugin.read();    len <<= 8;
-    len |= plugin.read() & ~1;
-    addr = plugin.read();    addr <<= 8;
-    addr |= plugin.read();
+    len = PLUGIN_READCHAR();    len <<= 8;
+    len |= PLUGIN_READCHAR() & ~1;
+    addr = PLUGIN_READCHAR();    addr <<= 8;
+    addr |= PLUGIN_READCHAR();
     //Serial.print("len: "); Serial.print(len); 
     //Serial.print(" addr: $"); Serial.println(addr, HEX);
 
@@ -361,8 +436,8 @@ uint16_t Adafruit_VS1053::loadPlugin(char *plugname) {
     // write data
     do {
       uint16_t data;
-      data = plugin.read();    data <<= 8;
-      data |= plugin.read();
+      data = PLUGIN_READCHAR();    data <<= 8;
+      data |= PLUGIN_READCHAR();
       sciWrite(VS1053_REG_WRAM, data);
     } while ((len -=2));
   }
@@ -447,6 +522,9 @@ uint8_t Adafruit_VS1053::begin(void) {
   digitalWrite(_dcs, HIGH);
   pinMode(_dreq, INPUT);
 
+#ifdef VS1053_USE_WIRINGPI
+  wiringPiSPISetup(VS1053_CHANNEL, VS1053_BUS_SPEED_HZ);
+#else
   if (! useHardwareSPI) {
     pinMode(_mosi, OUTPUT);
     pinMode(_clk, OUTPUT);
@@ -457,6 +535,7 @@ uint8_t Adafruit_VS1053::begin(void) {
     SPI.setBitOrder(MSBFIRST);
     SPI.setClockDivider(SPI_CLOCK_DIV128); 
   }
+#endif
 
   reset();
 
@@ -464,10 +543,19 @@ uint8_t Adafruit_VS1053::begin(void) {
 }
 
 void Adafruit_VS1053::dumpRegs(void) {
+#ifdef VS1053_USE_WIRINGPI
+  std::cerr << std::hex;
+  std::cerr << "Mode = 0x" << sciRead(VS1053_REG_MODE)  << std::endl;
+  std::cerr << "Stat = 0x" << sciRead(VS1053_REG_STATUS) << std::endl;
+  std::cerr << "ClkF = 0x" << sciRead(VS1053_REG_CLOCKF) << std::endl;
+  std::cerr << "Vol. = 0x" << sciRead(VS1053_REG_VOLUME) << std::endl;
+  std::cerr << std::dec;
+#else
   Serial.print("Mode = 0x"); Serial.println(sciRead(VS1053_REG_MODE), HEX);
   Serial.print("Stat = 0x"); Serial.println(sciRead(VS1053_REG_STATUS), HEX);
   Serial.print("ClkF = 0x"); Serial.println(sciRead(VS1053_REG_CLOCKF), HEX);
   Serial.print("Vol. = 0x"); Serial.println(sciRead(VS1053_REG_VOLUME), HEX);
+#endif
 }
 
 
@@ -479,8 +567,48 @@ uint16_t Adafruit_VS1053::recordedReadWord(void) {
   return sciRead(VS1053_REG_HDAT0);
 }
 
+uint32_t Adafruit_VS1053::recordedReadData(uint8_t* buff, uint32_t buffsiz) {
+  uint16_t pending;
+  uint32_t n_read_words = 0;
+  uint32_t n_limit = buffsiz/2;
+  while ((n_limit > 0) && (pending = recordedWordsWaiting()) > 0) {
+    if (pending > n_limit)
+      pending = n_limit;
+    n_limit -= pending;
+    n_read_words += pending;
+    
+    #ifdef VS1053_USE_WIRINGPI
 
-boolean Adafruit_VS1053::prepareRecordOgg(char *plugname) {
+    uint8_t pbuff[4];
+    while (pending--) {
+      pbuff[0] = VS1053_SCI_READ;
+      pbuff[1] = VS1053_REG_HDAT0;
+      pbuff[2] = 0xFF;
+      pbuff[3] = 0xFF;
+
+      digitalWrite(_cs, LOW);
+      wiringpi_spi_transfer(pbuff, 4, 0, true);
+      digitalWrite(_cs, HIGH);
+
+      buff[0] = pbuff[2];
+      buff[1] = pbuff[3];
+      buff += 2;
+    }
+
+    #else
+
+    while (pending--) {
+      uint16_t t = recordedReadWord();
+      *(buff++) = (t >> 8);
+      *(buff++) = (t & 0xFF);
+    }
+
+    #endif
+  }
+  return n_read_words * 2;
+}
+
+boolean Adafruit_VS1053::prepareRecordOgg(const char *plugname) {
   sciWrite(VS1053_REG_CLOCKF, 0xC000);  // set max clock
   delay(1);    while (! readyForData() );
 
@@ -496,7 +624,14 @@ boolean Adafruit_VS1053::prepareRecordOgg(char *plugname) {
 
   int pluginStartAddr = loadPlugin(plugname);
   if (pluginStartAddr == 0xFFFF) return false;
+#ifdef VS1053_USE_WIRINGPI
+  std::cerr << std::ios::hex;
+  std::cerr << "Plugin at $" << (uint16_t) pluginStartAddr << std::endl;
+  std::cerr << std::ios::dec;
+#else
   Serial.print("Plugin at $"); Serial.println(pluginStartAddr, HEX);
+#endif
+
   if (pluginStartAddr != 0x34) return false;
 
   return true;
@@ -583,13 +718,32 @@ uint16_t Adafruit_VS1053::sciRead(uint8_t addr) {
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.beginTransaction(VS1053_CONTROL_SPI_SETTING);
   #endif
-  digitalWrite(_cs, LOW);  
+  digitalWrite(_cs, LOW);
+  
+  #ifdef VS1053_USE_WIRINGPI
+  
+  // WiringPi read logic includes delay in spi call
+  uint8_t buff[2];
+  buff[0] = VS1053_SCI_READ;
+  buff[1] = addr;
+  wiringpi_spi_transfer(buff, 2, 10);
+  buff[0] = 0xFF;
+  buff[1] = 0xFF;
+  wiringpi_spi_transfer(buff, 2, 0, true);
+  data = ((uint16_t) buff[0] << 8) | (uint16_t) buff[1];
+  
+  #else
+  
+  // Default Arduino read logic
   spiwrite(VS1053_SCI_READ);
   spiwrite(addr);
   delayMicroseconds(10);
   data = spiread();
   data <<= 8;
   data |= spiread();
+  
+  #endif
+  
   digitalWrite(_cs, HIGH);
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.endTransaction();
@@ -603,11 +757,28 @@ void Adafruit_VS1053::sciWrite(uint8_t addr, uint16_t data) {
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.beginTransaction(VS1053_CONTROL_SPI_SETTING);
   #endif
-  digitalWrite(_cs, LOW);  
+  digitalWrite(_cs, LOW);
+  
+  #ifdef VS1053_USE_WIRINGPI
+  
+  // WiringPi SPI transfer uses a buffer to minimize OS calls
+  uint8_t buff[4];
+  buff[0] = VS1053_SCI_WRITE;
+  buff[1] = addr;
+  buff[2] = data >> 8;
+  buff[3] = data & 0xFF;
+  spiwrite(buff, sizeof(buff));
+  
+  #else
+  
+  // Standard Arduino write logic
   spiwrite(VS1053_SCI_WRITE);
   spiwrite(addr);
   spiwrite(data >> 8);
   spiwrite(data & 0xFF);
+  
+  #endif
+  
   digitalWrite(_cs, HIGH);
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.endTransaction();
@@ -625,7 +796,11 @@ uint8_t Adafruit_VS1053::spiread(void)
   // Make sure clock starts low
 
   if (useHardwareSPI) {
+#ifdef VS1053_USE_WIRINGPI
+    wiringpi_spi_transfer((uint8_t*) &x, 1, 0, true);
+#else
     x = SPI.transfer(0x00);
+#endif
   } else {
     for (i=7; i>=0; i--) {
       if ((*misoportreg) & misopin)
@@ -660,10 +835,14 @@ void Adafruit_VS1053::spiwrite(uint8_t *c, uint16_t num)
     //  return;
     //#endif
 
+#ifdef VS1053_USE_WIRINGPI
+    wiringpi_spi_transfer(c, num);
+#else
     while (num--) {
       SPI.transfer(c[0]);
       c++;
     }
+#endif
 
   } else {
     while (num--) {
@@ -695,10 +874,30 @@ void Adafruit_VS1053::sineTest(uint8_t n, uint16_t ms) {
   while (!digitalRead(_dreq));
 	 //  delay(10);
 
+  #ifdef VS1053_USE_WIRINGPI
+
+  // WiringPi puts the spiwrite calls into transfers
+  uint8_t asdf[8] = {0x53, 0xEF, 0x6E, n, 0x00, 0x00, 0x00, 0x00};
+  uint8_t sine_b[8] = {0x45, 0x78, 0x69, 0x74, 0x00, 0x00, 0x00, 0x00};
+  uint8_t sine_c[8] = {0x53, 0xEF, 0x6E, n, 0x00, 0x00, 0x00, 0x00};
+  
+  digitalWrite(_dcs, LOW);
+  wiringpi_spi_transfer(sine_c, sizeof(sine_c));
+  digitalWrite(_dcs, HIGH);
+  
+  delay(ms);
+  
+  digitalWrite(_dcs, LOW);
+  wiringpi_spi_transfer(sine_b, sizeof(sine_b));
+  digitalWrite(_dcs, HIGH);
+  
+  #else
+     
+  // Standard Arduino logic using multiple spiwrite calls
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.beginTransaction(VS1053_DATA_SPI_SETTING);
   #endif
-  digitalWrite(_dcs, LOW);  
+  digitalWrite(_dcs, LOW);
   spiwrite(0x53);
   spiwrite(0xEF);
   spiwrite(0x6E);
@@ -707,7 +906,7 @@ void Adafruit_VS1053::sineTest(uint8_t n, uint16_t ms) {
   spiwrite(0x00);
   spiwrite(0x00);
   spiwrite(0x00);
-  digitalWrite(_dcs, HIGH);  
+  digitalWrite(_dcs, HIGH);
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.endTransaction();
   #endif
@@ -717,7 +916,7 @@ void Adafruit_VS1053::sineTest(uint8_t n, uint16_t ms) {
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.beginTransaction(VS1053_DATA_SPI_SETTING);
   #endif
-  digitalWrite(_dcs, LOW);  
+  digitalWrite(_dcs, LOW);
   spiwrite(0x45);
   spiwrite(0x78);
   spiwrite(0x69);
@@ -726,8 +925,10 @@ void Adafruit_VS1053::sineTest(uint8_t n, uint16_t ms) {
   spiwrite(0x00);
   spiwrite(0x00);
   spiwrite(0x00);
-  digitalWrite(_dcs, HIGH);  
+  digitalWrite(_dcs, HIGH);
   #ifdef SPI_HAS_TRANSACTION
   if (useHardwareSPI) SPI.endTransaction();
+  #endif
+  
   #endif
 }
